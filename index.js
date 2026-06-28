@@ -14,7 +14,7 @@
 //   - se manca il token o la config, non parte ma logga chiaramente.
 // ============================================================
 
-const { Client, GatewayIntentBits, Partials } = require('discord.js');
+const { Client, GatewayIntentBits, Partials, Events } = require('discord.js');
 
 // --- Config (da variabili d'ambiente Railway) ---
 const TOKEN = process.env.DISCORD_BOT_TOKEN || '';
@@ -62,12 +62,12 @@ async function verifyCode(code, discordUser) {
   return { httpOk: res.ok, status: res.status, data };
 }
 
-client.once('ready', () => {
+client.once(Events.ClientReady, () => {
   console.log('[DISCORD] Bot di verifica online come ' + client.user.tag);
   console.log('[DISCORD] Ascolto il canale #verifica (' + VERIFY_CHANNEL_ID + ')');
 });
 
-client.on('messageCreate', async (msg) => {
+client.on(Events.MessageCreate, async (msg) => {
   try {
     // ignora i bot (incluso se stesso)
     if (msg.author.bot) return;

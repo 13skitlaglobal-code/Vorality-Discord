@@ -14,7 +14,11 @@
 //   - se manca il token o la config, non parte ma logga chiaramente.
 // ============================================================
 
-const { Client, GatewayIntentBits, Partials, Events } = require('discord.js');
+const {
+  Client, GatewayIntentBits, Partials, Events,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle,
+  ChannelType, PermissionFlagsBits,
+} = require('discord.js');
 
 // --- Config (da variabili d'ambiente Railway) ---
 const TOKEN = process.env.DISCORD_BOT_TOKEN || '';
@@ -23,6 +27,12 @@ const BRIDGE_SECRET = process.env.DISCORD_BRIDGE_SECRET || '';
 const GUILD_ID = process.env.DISCORD_GUILD_ID || '';
 const VERIFY_CHANNEL_ID = process.env.DISCORD_VERIFY_CHANNEL_ID || '';
 const VERIFIED_ROLE_ID = process.env.DISCORD_VERIFIED_ROLE_ID || '';
+
+// --- Sistema TICKET (opzionale: se mancano gli ID, i ticket restano spenti) ---
+const STAFF_ROLE_ID = process.env.DISCORD_STAFF_ROLE_ID || '';
+const ASSIST_CHANNEL_ID = process.env.DISCORD_ASSIST_CHANNEL_ID || '';
+const TICKET_CATEGORY_ID = process.env.DISCORD_TICKET_CATEGORY_ID || '';
+const TICKETS_ENABLED = !!(STAFF_ROLE_ID && ASSIST_CHANNEL_ID && TICKET_CATEGORY_ID);
 
 // controllo di configurazione minima
 const missing = [];
@@ -62,10 +72,164 @@ async function verifyCode(code, discordUser) {
   return { httpOk: res.ok, status: res.status, data };
 }
 
-client.once(Events.ClientReady, () => {
+// testo del messaggio di benvenuto fissato in #verifica
+const WELCOME_TEXT =
+  '🧭 **Benvenuto in Vorality — il prediction market italiano**\n\n' +
+  'Questo è il punto d\'ingresso. Un solo passo e sei dentro.\n\n' +
+  '🎟️ **Come verificarti:**\n' +
+  '1️⃣ Vai sul bot Telegram @Vorality_Play_bot\n' +
+  '2️⃣ Scrivi /discord e copia il codice che ti dà\n' +
+  '3️⃣ Incollalo qui sotto in questo canale\n\n' +
+  'Il bot ti verificherà al volo e si apriranno tutti i canali della community.\n\n' +
+  '⏱️ Il codice dura 15 minuti e vale una volta sola.\n' +
+  '❓ Problemi? Apri un ticket nel canale assistenza.';
+
+// "firma" per riconoscere il nostro messaggio di benvenuto tra i fissati
+const WELCOME_TAG = 'Benvenuto in Vorality';
+
+// pubblica e fissa il benvenuto SOLO se non è già presente tra i messaggi fissati
+async function ensureWelcome() {
+  try {
+    const channel = await client.channels.fetch(VERIFY_CHANNEL_ID);
+    if (!channel || !channel.isTextBased()) return;
+
+    // controlla i messaggi già fissati: se il benvenuto c'è, non fare nulla
+    const pinned = await channel.messages.fetchPinned().catch(() => null);
+    if (pinned && pinned.some(m => (m.content || '').includes(WELCOME_TAG))) {
+      console.log('[DISCORD] benvenuto già presente, non lo ripubblico.');
+      return;
+    }
+
+    // non c'è: pubblica e fissa
+    const sent = await channel.send(WELCOME_TEXT);
+    await sent.pin().catch((e) => console.error('[DISCORD] non riesco a fissare il benvenuto:', e.message));
+    console.log('[DISCORD] benvenuto pubblicato e fissato in #verifica.');
+  } catch (e) {
+    console.error('[DISCORD] errore pubblicazione benvenuto:', e.message);
+  }
+}
+
+// ============================================================
+//  SISTEMA TICKET
+// ============================================================
+
+const TICKET_PANEL_TAG = 'Hai bisogno di aiuto';
+
+// pubblica il pannello con il bottone "Apri ticket" in #assistenza (solo se non c'è già)
+async function ensureTicketPanel() {
+  if (!TICKETS_ENABLED) return;
+  try {
+    const channel = await client.channels.fetch(ASSIST_CHANNEL_ID);
+    if (!channel || !channel.isTextBased()) return;
+
+    const pinned = await channel.messages.fetchPinned().catch(() => null);
+    if (pinned && pinned.some(m => (m.content || '').includes(TICKET_PANEL_TAG))) {
+      console.log('[DISCORD] pannello ticket già presente.');
+      return;
+    }
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('apri_ticket')
+        .setLabel('🎫 Apri ticket')
+        .setStyle(ButtonStyle.Primary)
+    );
+
+    const sent = await channel.send({
+      content:
+        '🛟 **Hai bisogno di aiuto?**\n\n' +
+        'Apri un ticket: si creerà un canale privato visibile solo a te e allo staff di Vorality.\n' +
+        'Spiega lì il tuo problema e ti risponderemo al più presto.',
+      components: [row],
+    });
+    await sent.pin().catch(() => {});
+    console.log('[DISCORD] pannello ticket pubblicato in #assistenza.');
+  } catch (e) {
+    console.error('[DISCORD] errore pannello ticket:', e.message);
+  }
+}
+
+// crea un canale-ticket privato per l'utente
+async function apriTicket(interaction) {
+  const guild = interaction.guild;
+  const user = interaction.user;
+
+  // evita doppioni: se l'utente ha già un ticket aperto, lo segnaliamo
+  const esistente = guild.channels.cache.find(
+    c => c.parentId === TICKET_CATEGORY_ID && c.topic === 'ticket:' + user.id
+  );
+  if (esistente) {
+    await interaction.reply({ content: 'Hai già un ticket aperto: ' + esistente.toString(), ephemeral: true });
+    return;
+  }
+
+  // nome canale pulito (lettere/numeri dal nome utente)
+  const safe = (user.username || 'utente').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20) || 'utente';
+
+  const canale = await guild.channels.create({
+    name: 'ticket-' + safe,
+    type: ChannelType.GuildText,
+    parent: TICKET_CATEGORY_ID,
+    topic: 'ticket:' + user.id, // serve a riconoscere il proprietario
+    permissionOverwrites: [
+      { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+      { id: user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+      { id: STAFF_ROLE_ID, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+      { id: client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels] },
+    ],
+  });
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('chiudi_ticket').setLabel('🔒 Chiudi ticket').setStyle(ButtonStyle.Danger)
+  );
+
+  await canale.send({
+    content: user.toString() + ' benvenuto nel tuo ticket.\n\n' +
+      'Spiega qui il tuo problema: lo staff di Vorality ti risponderà appena possibile.\n' +
+      'Quando hai finito, premi **Chiudi ticket**.',
+    components: [row],
+  });
+
+  await interaction.reply({ content: 'Ticket creato: ' + canale.toString(), ephemeral: true });
+}
+
+// chiude (cancella) un canale-ticket
+async function chiudiTicket(interaction) {
+  const canale = interaction.channel;
+  // sicurezza: si chiude solo dentro la categoria ticket
+  if (canale.parentId !== TICKET_CATEGORY_ID) {
+    await interaction.reply({ content: 'Questo comando funziona solo dentro un ticket.', ephemeral: true });
+    return;
+  }
+  await interaction.reply({ content: 'Ticket in chiusura tra 5 secondi…' });
+  setTimeout(() => { canale.delete().catch((e) => console.error('[DISCORD] errore chiusura ticket:', e.message)); }, 5000);
+}
+
+client.once(Events.ClientReady, async () => {
   console.log('[DISCORD] Bot di verifica online come ' + client.user.tag);
   console.log('[DISCORD] Ascolto il canale #verifica (' + VERIFY_CHANNEL_ID + ')');
+  await ensureWelcome();
+  await ensureTicketPanel();
+  console.log('[DISCORD] Sistema ticket: ' + (TICKETS_ENABLED ? 'attivo' : 'spento (ID mancanti)'));
 });
+
+// gestione click sui bottoni
+client.on(Events.InteractionCreate, async (interaction) => {
+  try {
+    if (!interaction.isButton()) return;
+    if (interaction.customId === 'apri_ticket') {
+      await apriTicket(interaction);
+    } else if (interaction.customId === 'chiudi_ticket') {
+      await chiudiTicket(interaction);
+    }
+  } catch (e) {
+    console.error('[DISCORD] errore interazione:', e.message);
+    if (interaction.isRepliable() && !interaction.replied) {
+      interaction.reply({ content: 'Si è verificato un problema. Riprova.', ephemeral: true }).catch(() => {});
+    }
+  }
+});
+
 
 client.on(Events.MessageCreate, async (msg) => {
   try {
@@ -75,6 +239,8 @@ client.on(Events.MessageCreate, async (msg) => {
     if (msg.channelId !== VERIFY_CHANNEL_ID) return;
     // solo nel server giusto (se configurato)
     if (GUILD_ID && msg.guildId !== GUILD_ID) return;
+    // non toccare MAI i messaggi fissati (es. il benvenuto)
+    if (msg.pinned) return;
 
     const match = (msg.content || '').match(CODE_RE);
     if (!match) {

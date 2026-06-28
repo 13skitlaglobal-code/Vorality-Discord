@@ -130,7 +130,9 @@ client.on(Events.MessageCreate, async (msg) => {
     }
 
     // pulizia: cancella il messaggio col codice (così altri non lo vedono)
-    msg.delete().catch(() => {});
+    msg.delete().catch((e) => {
+      console.error('[DISCORD] non riesco a cancellare il messaggio col codice:', e.message);
+    });
   } catch (e) {
     console.error('[DISCORD] errore in messageCreate:', e.message);
   }

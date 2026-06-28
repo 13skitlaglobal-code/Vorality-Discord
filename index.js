@@ -34,6 +34,11 @@ const ASSIST_CHANNEL_ID = process.env.DISCORD_ASSIST_CHANNEL_ID || '';
 const TICKET_CATEGORY_ID = process.env.DISCORD_TICKET_CATEGORY_ID || '';
 const TICKETS_ENABLED = !!(STAFF_ROLE_ID && ASSIST_CHANNEL_ID && TICKET_CATEGORY_ID);
 
+// --- Endpoint per generare inviti monouso (lo chiama il bot gioco) ---
+const HTTP_PORT = process.env.PORT || 3000;
+// invito creato sul canale #verifica (quello che chi entra deve vedere). Riusa VERIFY_CHANNEL_ID.
+const INVITE_TTL_SECONDS = parseInt(process.env.DISCORD_INVITE_TTL || '900', 10); // 15 min
+
 // controllo di configurazione minima
 const missing = [];
 if (!TOKEN) missing.push('DISCORD_BOT_TOKEN');
@@ -302,6 +307,61 @@ client.on(Events.MessageCreate, async (msg) => {
   } catch (e) {
     console.error('[DISCORD] errore in messageCreate:', e.message);
   }
+});
+
+// ============================================================
+//  SERVER HTTP — endpoint per creare inviti monouso
+//  Lo chiama il BOT GIOCO quando l'utente fa /discord.
+//  Protetto dal segreto condiviso (DISCORD_BRIDGE_SECRET).
+// ============================================================
+const http = require('http');
+
+http.createServer(async (req, res) => {
+  // health check semplice
+  if (req.method === 'GET' && req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, service: 'vorality-discord-bot' }));
+    return;
+  }
+
+  // crea invito monouso
+  if (req.method === 'POST' && req.url === '/crea-invito') {
+    // protezione col segreto condiviso
+    const key = req.headers['x-bridge-key'] || '';
+    if (!BRIDGE_SECRET || key !== BRIDGE_SECRET) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'forbidden' }));
+      return;
+    }
+    try {
+      const channel = await client.channels.fetch(VERIFY_CHANNEL_ID);
+      if (!channel) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'canale non trovato' }));
+        return;
+      }
+      // invito monouso: 1 utilizzo, scade dopo INVITE_TTL_SECONDS
+      const invite = await channel.createInvite({
+        maxUses: 1,
+        maxAge: INVITE_TTL_SECONDS,
+        unique: true,
+        reason: 'Invito monouso Vorality (da /discord)',
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, url: 'https://discord.gg/' + invite.code }));
+    } catch (e) {
+      console.error('[DISCORD] errore creazione invito:', e.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: e.message }));
+    }
+    return;
+  }
+
+  // tutto il resto
+  res.writeHead(404, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ ok: false, error: 'not_found' }));
+}).listen(HTTP_PORT, () => {
+  console.log('[DISCORD] server HTTP in ascolto sulla porta ' + HTTP_PORT + ' (endpoint /crea-invito)');
 });
 
 client.login(TOKEN).catch((e) => {

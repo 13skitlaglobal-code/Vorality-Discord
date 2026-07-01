@@ -368,3 +368,6 @@ client.login(TOKEN).catch((e) => {
   console.error('[DISCORD] Login fallito:', e.message);
   process.exit(1);
 });
+
+
+require('./discord-pulse.js');

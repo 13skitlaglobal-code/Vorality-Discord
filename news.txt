@@ -1,0 +1,5 @@
+# Vorality — NEWS (una riga = un messaggio nella categoria "news"). Righe con # ignorate.
+# Se vuoto, si usano le news di default in rotation-messages.js. Aggiorna e ridistribuisci.
+# Esempi (togli il # per attivare):
+# 📰 Nuovi mercati in arrivo nella Mini App: resta connesso. 🧭
+# 📰 La waitlist cresce: benvenuti ai nuovi giocatori di questa settimana. 🧭
